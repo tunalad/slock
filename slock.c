@@ -247,11 +247,27 @@ readpw(Display *dpy, struct xrandr *rr, struct lock **locks, int nscreens,
 					break;
 			}
 			color = len ? INPUT : ((failure || failonclear) ? FAILED : INIT);
+
+			static int logo_active = 0;
+
 			if (running && oldc != color) {
 				for (screen = 0; screen < nscreens; screen++) {
 					drawlogo(dpy, locks[screen], color);
 				}
 				oldc = color;
+
+				// making the logo flash when pressing
+				if (!logo_active && color != FAILED) {
+					logo_active = 1; // mark the logo as active
+					usleep(100000);
+
+					for (screen = 0; screen < nscreens; screen++) {
+						drawlogo(dpy, locks[screen], INIT);
+					}
+
+					logo_active = 0;
+					oldc = INIT;
+				}
 			}
 		} else if (rr->active && ev.type == rr->evbase + RRScreenChangeNotify) {
 			rre = (XRRScreenChangeNotifyEvent*)&ev;
