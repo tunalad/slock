@@ -420,16 +420,13 @@ main(int argc, char **argv) {
 
 	/* validate drop-user and -group */
 	errno = 0;
-	if (!(pwd = getpwnam(getenv("USER"))))
-		die("slock: getpwnam %s: %s\n", getenv("USER"),
+	if (!(pwd = getpwnam(user)))
+		die("slock: getpwnam %s: %s\n", user,
 		    errno ? strerror(errno) : "user entry not found");
 	duid = pwd->pw_uid;
-	dgid = pwd->pw_gid;
 	errno = 0;
-	// struct group *temp_grp = getgrgid(dgid);
-	// fprintf(stderr, "Group name: %s\n", temp_grp->gr_name);
-	if (!(grp = getgrgid(dgid)))
-		die("slock: getgrnam %s: %s\n", getenv("USER"),
+	if (!(grp = getgrnam(group)))
+		die("slock: getgrnam %s: %s\n", group,
 		    errno ? strerror(errno) : "group entry not found");
 	dgid = grp->gr_gid;
 
