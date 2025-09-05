@@ -171,8 +171,44 @@ drawlogo(Display *dpy, struct lock *lock, int color)
 }
 
 static void
-readpw(Display *dpy, struct xrandr *rr, struct lock **locks, int nscreens,
-       const char *hash)
+draw_datetime(Display *dpy, struct lock *lock)
+{
+	Window win = lock->win;
+    XftDraw *draw;
+    XftFont *font = NULL;
+    XftColor color;
+    char buf[64];
+    time_t t = time(NULL);
+    strftime(buf, sizeof(buf), timeformat, localtime(&t));
+
+	/* try to load fonts in order until one succeeds */
+    for (int i = 0; i < LENGTH(fonts) && !font; i++) {
+        font = XftFontOpenName(dpy, DefaultScreen(dpy), fonts[i]);
+    }
+
+    if (!font) {
+        fprintf(stderr, "slock: unable to load any time font\n");
+        return;
+    }
+
+    XRenderColor xrcolor = { 0xffff, 0xffff, 0xffff, 0xffff }; // white
+    XftColorAllocValue(dpy, DefaultVisual(dpy, 0), DefaultColormap(dpy, 0), &xrcolor, &color);
+
+    draw = XftDrawCreate(dpy, win, DefaultVisual(dpy, 0), DefaultColormap(dpy, 0));
+
+    /* Clear the area and draw text */
+    XClearArea(dpy, win, 50, 50 - 20, 300, 30, False);
+    XftDrawStringUtf8(draw, &color, font, 50, 50, (FcChar8 *)buf, strlen(buf));
+
+    /* Make sure it's visible immediately */
+    XFlush(dpy);
+
+    XftDrawDestroy(draw);
+    XftFontClose(dpy, font);
+}
+
+static void
+readpw(Display *dpy, struct xrandr *rr, struct lock **locks, int nscreens, const char *hash)
 {
 	XRRScreenChangeNotifyEvent *rre;
 	char buf[32], passwd[256], *inputhash;
@@ -180,113 +216,137 @@ readpw(Display *dpy, struct xrandr *rr, struct lock **locks, int nscreens,
 	unsigned int len, color;
 	KeySym ksym;
 	XEvent ev;
+	time_t last_update = 0;
 
 	len = 0;
 	running = 1;
 	failure = 0;
 	oldc = INIT;
 
-	while (running && !XNextEvent(dpy, &ev)) {
-		running = !((time(NULL) - locktime < timetocancel) && (ev.type == MotionNotify));
-		if (ev.type == KeyPress) {
-			explicit_bzero(&buf, sizeof(buf));
-			num = XLookupString(&ev.xkey, buf, sizeof(buf), &ksym, 0);
-			if (IsKeypadKey(ksym)) {
-				if (ksym == XK_KP_Enter)
-					ksym = XK_Return;
-				else if (ksym >= XK_KP_0 && ksym <= XK_KP_9)
-					ksym = (ksym - XK_KP_0) + XK_0;
-			}
-			if (IsFunctionKey(ksym) ||
-					IsKeypadKey(ksym) ||
-					IsMiscFunctionKey(ksym) ||
-					IsPFKey(ksym) ||
-					IsPrivateKeypadKey(ksym))
-				continue;
-			switch (ksym) {
-				case XF86XK_AudioPlay:
-				case XF86XK_AudioStop:
-				case XF86XK_AudioPrev:
-				case XF86XK_AudioNext:
-				case XF86XK_AudioRaiseVolume:
-				case XF86XK_AudioLowerVolume:
-				case XF86XK_AudioMute:
-				case XF86XK_AudioMicMute:
-				case XF86XK_MonBrightnessDown:
-				case XF86XK_MonBrightnessUp:
-					XSendEvent(dpy, DefaultRootWindow(dpy), True, KeyPressMask, &ev);
-					break;
-				case XK_Return:
-					passwd[len] = '\0';
-					errno = 0;
-					if (!(inputhash = crypt(passwd, hash)))
-						fprintf(stderr, "slock: crypt: %s\n", strerror(errno));
-					else
-						running = !!strcmp(inputhash, hash);
-					if (running) {
-						XBell(dpy, 100);
-						failure = 1;
-					}
-					explicit_bzero(&passwd, sizeof(passwd));
-					len = 0;
-					break;
-				case XK_Escape:
-					explicit_bzero(&passwd, sizeof(passwd));
-					len = 0;
-					break;
-				case XK_BackSpace:
-					if (len)
-						passwd[--len] = '\0';
-					break;
-				default:
-					if (num && !iscntrl((int)buf[0]) &&
-							(len + num < sizeof(passwd))) {
-						memcpy(passwd + len, buf, num);
-						len += num;
-					}
-					break;
-			}
-			color = len ? INPUT : ((failure || failonclear) ? FAILED : INIT);
-
-			static int logo_active = 0;
-
-			if (running && oldc != color) {
-				for (screen = 0; screen < nscreens; screen++) {
-					drawlogo(dpy, locks[screen], color);
-				}
-				oldc = color;
-
-				// making the logo flash when pressing
-				if (!logo_active && color != FAILED) {
-					logo_active = 1; // mark the logo as active
-					usleep(100000);
-
-					for (screen = 0; screen < nscreens; screen++) {
-						drawlogo(dpy, locks[screen], INIT);
-					}
-
-					logo_active = 0;
-					oldc = INIT;
-				}
-			}
-		} else if (rr->active && ev.type == rr->evbase + RRScreenChangeNotify) {
-			rre = (XRRScreenChangeNotifyEvent*)&ev;
+	while (running) {
+		// Check if we need to update datetime (every second)
+		time_t now = time(NULL);
+		if (now != last_update) {
 			for (screen = 0; screen < nscreens; screen++) {
-				if (locks[screen]->win == rre->window) {
-					if (rre->rotation == RR_Rotate_90 ||
-							rre->rotation == RR_Rotate_270)
-						XResizeWindow(dpy, locks[screen]->win,
-								rre->height, rre->width);
-					else
-						XResizeWindow(dpy, locks[screen]->win,
-								rre->width, rre->height);
-					XClearWindow(dpy, locks[screen]->win);
-					break;
+				draw_datetime(dpy, locks[screen]);
+			}
+			last_update = now;
+		}
+
+		// Check if there are any X11 events pending
+		if (XPending(dpy)) {
+			XNextEvent(dpy, &ev);
+
+			running = !((time(NULL) - locktime < timetocancel) && (ev.type == MotionNotify));
+
+			if (ev.type == KeyPress) {
+				explicit_bzero(&buf, sizeof(buf));
+				num = XLookupString(&ev.xkey, buf, sizeof(buf), &ksym, 0);
+				if (IsKeypadKey(ksym)) {
+					if (ksym == XK_KP_Enter)
+						ksym = XK_Return;
+					else if (ksym >= XK_KP_0 && ksym <= XK_KP_9)
+						ksym = (ksym - XK_KP_0) + XK_0;
+				}
+				if (IsFunctionKey(ksym) ||
+						IsKeypadKey(ksym) ||
+						IsMiscFunctionKey(ksym) ||
+						IsPFKey(ksym) ||
+						IsPrivateKeypadKey(ksym))
+					continue;
+				switch (ksym) {
+					case XF86XK_AudioPlay:
+					case XF86XK_AudioStop:
+					case XF86XK_AudioPrev:
+					case XF86XK_AudioNext:
+					case XF86XK_AudioRaiseVolume:
+					case XF86XK_AudioLowerVolume:
+					case XF86XK_AudioMute:
+					case XF86XK_AudioMicMute:
+					case XF86XK_MonBrightnessDown:
+					case XF86XK_MonBrightnessUp:
+						XSendEvent(dpy, DefaultRootWindow(dpy), True, KeyPressMask, &ev);
+						break;
+					case XK_Return:
+						passwd[len] = '\0';
+						errno = 0;
+						if (!(inputhash = crypt(passwd, hash)))
+							fprintf(stderr, "slock: crypt: %s\n", strerror(errno));
+						else
+							running = !!strcmp(inputhash, hash);
+						if (running) {
+							XBell(dpy, 100);
+							failure = 1;
+						}
+						explicit_bzero(&passwd, sizeof(passwd));
+						len = 0;
+						break;
+					case XK_Escape:
+						explicit_bzero(&passwd, sizeof(passwd));
+						len = 0;
+						break;
+					case XK_BackSpace:
+						if (len)
+							passwd[--len] = '\0';
+						break;
+					default:
+						if (num && !iscntrl((int)buf[0]) &&
+								(len + num < sizeof(passwd))) {
+							memcpy(passwd + len, buf, num);
+							len += num;
+						}
+						break;
+				}
+				color = len ? INPUT : ((failure || failonclear) ? FAILED : INIT);
+
+				static int logo_active = 0;
+
+				if (running && oldc != color) {
+					for (screen = 0; screen < nscreens; screen++) {
+						drawlogo(dpy, locks[screen], color);
+						draw_datetime(dpy, locks[screen]);
+					}
+					oldc = color;
+
+					// making the logo flash when pressing
+					if (!logo_active && color != FAILED) {
+						logo_active = 1; // mark the logo as active
+						usleep(100000);
+
+						for (screen = 0; screen < nscreens; screen++) {
+							drawlogo(dpy, locks[screen], INIT);
+							draw_datetime(dpy, locks[screen]);
+						}
+
+						logo_active = 0;
+						oldc = INIT;
+					}
+				}
+			} else if (rr->active && ev.type == rr->evbase + RRScreenChangeNotify) {
+				rre = (XRRScreenChangeNotifyEvent*)&ev;
+				for (screen = 0; screen < nscreens; screen++) {
+					if (locks[screen]->win == rre->window) {
+						if (rre->rotation == RR_Rotate_90 ||
+								rre->rotation == RR_Rotate_270)
+							XResizeWindow(dpy, locks[screen]->win,
+									rre->height, rre->width);
+						else
+							XResizeWindow(dpy, locks[screen]->win,
+									rre->width, rre->height);
+						XClearWindow(dpy, locks[screen]->win);
+						draw_datetime(dpy, locks[screen]);
+						break;
+					}
+				}
+			} else {
+				for (screen = 0; screen < nscreens; screen++) {
+					XRaiseWindow(dpy, locks[screen]->win);
+					draw_datetime(dpy, locks[screen]);
 				}
 			}
 		} else {
-			for (screen = 0; screen < nscreens; screen++)
-				XRaiseWindow(dpy, locks[screen]->win);
+			// No events pending, sleep briefly to avoid busy waiting
+			usleep(100000); // Sleep for 100ms
 		}
 	}
 }
@@ -358,6 +418,7 @@ lockscreen(Display *dpy, struct xrandr *rr, int screen)
 	                          CWOverrideRedirect | CWBackPixel, &wa);
     if(lock->bgmap)
         XSetWindowBackgroundPixmap(dpy, lock->win, lock->bgmap);
+
 	lock->pmap = XCreateBitmapFromData(dpy, lock->win, curs, 8, 8);
 	invisible = XCreatePixmapCursor(dpy, lock->pmap, lock->pmap,
 	                                &color, &color, 0, 0);
@@ -407,6 +468,7 @@ lockscreen(Display *dpy, struct xrandr *rr, int screen)
 		        screen);
 	return NULL;
 }
+
 
 static void
 usage(void)

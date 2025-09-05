@@ -8,6 +8,10 @@ static const char *colorname[NUMCOLS] = {
 	[FAILED] = "#CC3333",   /* wrong password */
 };
 
+/* font used for drawing date and time */
+static const char *fonts[] = { "DejaVu Sans Mono:size=15", "DejaVuSansM Nerd Font Propo:size=15", "monospace:size=15" };
+static const char *timeformat = "%Y-%m-%d %H:%M:%S";
+
 /* treat a cleared input like a wrong password (color) */
 static const int failonclear = 1;
 
